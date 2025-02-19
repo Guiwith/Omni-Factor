@@ -62,7 +62,7 @@ class ScraperScheduler:
         conn = sqlite3.connect('scraper.db')
         c = conn.cursor()
         
-        # 修改任务表结构，移除interval字段，添加schedule字段
+        
         c.execute('''CREATE TABLE IF NOT EXISTS tasks
                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
                      url TEXT NOT NULL,

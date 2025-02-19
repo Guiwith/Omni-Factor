@@ -1,5 +1,5 @@
-# Omni-Factor
- Omni-Factor 万物因子
+# Omni-Factor 万物因子
+ Omni-Factor
  万物因子是一个用于对网页进行监控同时借助ai进行分析总结的工具
 
 ## 功能
