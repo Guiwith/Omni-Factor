@@ -4,192 +4,124 @@ from playwright.sync_api import sync_playwright
 import os
 
 def get_element_selector(page):
-    # 直接从页面获取选中的元素
     selector = page.evaluate('''() => {
-        try {
-            const element = window.selectedElement;
-            if (!element || element.nodeType !== Node.ELEMENT_NODE) {
-                throw new Error("无效的元素对象");
-            }
-            
-            const path = [];
-            let currentElement = element;
-            
-            while (currentElement && currentElement.nodeType === Node.ELEMENT_NODE && currentElement.tagName !== 'HTML') {
-                let selector = currentElement.tagName.toLowerCase();
-                
-                // 如果有id，优先使用id
-                if (currentElement.id) {
-                    selector = '#' + CSS.escape(currentElement.id);
-                    path.unshift(selector);
-                    break;
-                }
-                
-                // 如果有class，使用第一个class
-                if (currentElement.classList.length > 0) {
-                    selector += '.' + CSS.escape(currentElement.classList[0]);
-                }
-                
-                // 如果有父元素，计算索引
-                if (currentElement.parentNode) {
-                    const siblings = Array.from(currentElement.parentNode.children)
-                        .filter(e => e.tagName === currentElement.tagName);
-                    
-                    if (siblings.length > 1) {
-                        const index = siblings.indexOf(currentElement) + 1;
-                        selector += `:nth-of-type(${index})`;
-                    }
-                }
-                
-                path.unshift(selector);
-                currentElement = currentElement.parentNode;
-            }
-            
-            return path.join(' > ');
-            
-        } catch (error) {
-            console.error('Selector generation error:', error);
-            return '';
-        }
-    }''')
-    
-    if not selector:
-        raise Exception("选择器生成失败")
+        const element = window.selectedElement;
+        if (!element) return '';
         
-    return selector.strip()  # 返回纯净的选择器
+        const path = [];
+        let current = element;
+        
+        while (current && current.tagName !== 'HTML') {
+            let selector = current.tagName.toLowerCase();
+            
+            if (current.id) {
+                return '#' + CSS.escape(current.id);
+            }
+            
+            if (current.classList.length) {
+                selector += '.' + CSS.escape(current.classList[0]);
+            }
+            
+            const siblings = Array.from(current.parentNode?.children || [])
+                .filter(e => e.tagName === current.tagName);
+            
+            if (siblings.length > 1) {
+                selector += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+            }
+            
+            path.unshift(selector);
+            current = current.parentNode;
+        }
+        
+        return path.join(' > ');
+    }''')
+    return selector.strip()
 
-def write_selector_info(data, file_path):
-    try:
-        with open(file_path, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False)
-        return True
-    except Exception as e:
-        print(f"写入失败: {str(e)}")
-        return False
+def save_selector_info(selector, preview, file_path):
+    with open(file_path, 'w', encoding='utf-8') as f:
+        json.dump({
+            'selector': selector,
+            'preview': preview
+        }, f, ensure_ascii=False)
 
-def on_element_selected(selector, preview_content, file_path):
-    # 确保选择器不包含额外信息
-    clean_selector = selector.strip()  # 只保存纯选择器
-    
-    selector_info = {
-        'selector': clean_selector,  # 存储纯选择器
-        'preview': preview_content   # 预览内容单独保存
-    }
-    write_selector_info(selector_info, file_path)
+def inject_selector_ui(page):
+    page.evaluate('''() => {
+        const style = document.createElement('style');
+        style.textContent = `
+            #selector-tip {
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                background: rgba(0, 0, 0, 0.8);
+                color: white;
+                padding: 10px;
+                border-radius: 5px;
+                z-index: 999999;
+            }
+            .highlight-element {
+                outline: 4px solid #00FF00 !important;
+            }
+            .selected-element {
+                outline: 4px solid red !important;
+            }
+        `;
+        document.head.appendChild(style);
+        
+        const tip = document.createElement('div');
+        tip.id = 'selector-tip';
+        tip.textContent = '请选择要监控的元素';
+        document.body.appendChild(tip);
+        
+        window.selectedElement = null;
+        
+        document.addEventListener('mouseover', e => {
+            e.target.classList.add('highlight-element');
+        });
+        
+        document.addEventListener('mouseout', e => {
+            if (e.target !== window.selectedElement) {
+                e.target.classList.remove('highlight-element');
+            }
+        });
+        
+        document.addEventListener('click', e => {
+            e.preventDefault();
+            e.stopPropagation();
+            
+            if (window.selectedElement) {
+                window.selectedElement.classList.remove('selected-element');
+            }
+            
+            window.selectedElement = e.target;
+            e.target.classList.add('selected-element');
+            
+            document.getElementById('selector-tip').textContent = '已选择元素';
+            window.selectorPreview = e.target.innerText.substring(0, 50);
+            window.dispatchEvent(new CustomEvent('selectorChosen'));
+        });
+    }''')
 
 def main(url, selector_file):
-    try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False)
-            context = browser.new_context(
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            )
-            page = context.new_page()
-            
-            print(f"正在访问页面: {url}")
-            try:
-                # 先加载页面
-                response = page.goto(url, 
-                    timeout=60000,
-                    wait_until='domcontentloaded'
-                )
-                
-                if not response:
-                    raise Exception("页面加载失败：无响应")
-                    
-                if response.status != 200:
-                    raise Exception(f"页面加载失败：HTTP状态码 {response.status}")
-                
-                # 等待页面稳定
-                page.wait_for_load_state('networkidle', timeout=30000)
-                print("页面加载完成")
-                
-                # 在页面加载完成后注入提示和选择器功能
-                page.evaluate('''() => {
-                    // 创建并添加样式
-                    const style = document.createElement('style');
-                    style.textContent = `
-                        #loading-tip {
-                            position: fixed;
-                            top: 20px;
-                            right: 20px;
-                            background: rgba(0, 0, 0, 0.8);
-                            color: white;
-                            padding: 10px 20px;
-                            border-radius: 5px;
-                            z-index: 999999;
-                            font-family: Arial, sans-serif;
-                            font-size: 14px;
-                        }
-                    `;
-                    document.head.appendChild(style);
-                    
-                    // 创建提示元素
-                    const loadingTip = document.createElement('div');
-                    loadingTip.id = 'loading-tip';
-                    loadingTip.textContent = '请用鼠标选择要监控的元素（绿框标注）';
-                    document.body.appendChild(loadingTip);
-                    
-                    // 初始化选择器功能
-                    window.selectedElement = null;
-                    
-                    document.addEventListener('mouseover', (e) => {
-                        e.target.style.outline = '4px solid #00FF00';
-                    });
-                    
-                    document.addEventListener('mouseout', (e) => {
-                        if (e.target !== window.selectedElement) {
-                            e.target.style.outline = '';
-                        }
-                    });
-                    
-                    document.addEventListener('click', (e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        
-                        if (window.selectedElement) {
-                            window.selectedElement.style.outline = '';
-                        }
-                        window.selectedElement = e.target;
-                        window.selectedElement.style.outline = '4px solid red';
-                        
-                        const preview = e.target.innerText.substring(0, 50) + 
-                            (e.target.innerText.length > 50 ? '...' : '');
-                        
-                        window.selectorPreview = preview;
-                        
-                        const loadingTip = document.getElementById('loading-tip');
-                        if (loadingTip) {
-                            loadingTip.textContent = '元素已选择，即将关闭窗口...';
-                        }
-                        
-                        window.dispatchEvent(new CustomEvent('selectorChosen'));
-                    });
-                }''')
-                
-            except Exception as e:
-                print(f"页面加载或操作错误: {str(e)}")
-                raise
-            
-            # 等待选择器事件
-            page.evaluate('''() => new Promise((resolve) => {
-                window.addEventListener('selectorChosen', resolve, { once: true });
-            })''')
-            
-            try:
-                selector = get_element_selector(page)
-                preview = page.evaluate('window.selectorPreview')
-                
-                on_element_selected(selector, preview, selector_file)
-            except Exception as e:
-                print(f"选择器生成错误: {str(e)}")
-                raise e
-            
-            browser.close()
-            
-    except Exception as e:
-        print(f"发生错误: {str(e)}")
-        raise e
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=False)
+        context = browser.new_context(
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        )
+        page = context.new_page()
+        
+        page.goto(url, wait_until='domcontentloaded')
+        page.wait_for_load_state('networkidle', timeout=30000)
+        
+        inject_selector_ui(page)
+        
+        # 等待选择器事件
+        page.evaluate('() => new Promise(resolve => window.addEventListener("selectorChosen", resolve, { once: true }))')
+        
+        selector = get_element_selector(page)
+        preview = page.evaluate('window.selectorPreview')
+        save_selector_info(selector, preview, selector_file)
+        
+        browser.close()
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
